@@ -1,0 +1,132 @@
+#!/usr/bin/python
+
+import sys
+import time
+import datetime
+import RPi.GPIO as GPIO
+import mydev
+
+LCD_I2C_ADDR = 0x3f
+THERMO_SENSOR_ID = '28-0116014658ee'
+
+SWITCH_GPIO    = 17
+LED_RED_GPIO   = 16
+LED_GREEN_GPIO = 20
+LED_BLUE_GPIO  = 21
+
+MAIN_LOOP_INTERVAL = 0.05
+SWITCH_NOISE_IGNORE = 5
+
+C_UNIT = chr(0xdf) + 'C'
+F_UNIT = chr(0xdf) + 'F'
+
+class Display:
+    def __init__(self):
+        self.isFirst = True
+        self.isUpdating = False
+        self.isCMode = True
+        self.timeStr = ''
+        self.tempStr = ''
+
+        GPIO.setup(LED_RED_GPIO, GPIO.OUT)
+        GPIO.setup(LED_GREEN_GPIO, GPIO.OUT)
+        GPIO.setup(LED_BLUE_GPIO, GPIO.OUT)
+        GPIO.output(LED_RED_GPIO, False)
+        GPIO.output(LED_GREEN_GPIO, False)
+        GPIO.output(LED_BLUE_GPIO, False)
+
+        self.lcd = mydev.I2CLCD(LCD_I2C_ADDR)
+        self.lcd.sendString(0, 'Initializing...')
+
+    def shutdown(self):
+        self.lcd.sendString(0, 'Shutting down...')
+        self.lcd.sendString(1, ' ')
+
+    def off(self):
+        GPIO.output(LED_RED_GPIO, False)
+        GPIO.output(LED_GREEN_GPIO, False)
+        GPIO.output(LED_BLUE_GPIO, False)
+        self.lcd.off()
+
+    def update(self, updating, cmode, time, temp):
+        updateLED = False
+        updateTime = False
+        updateTemp = False
+        
+        if self.isFirst:
+            updateLED = True
+            updateTime = True
+            updateTemp = True
+            self.isFirst = False
+        else:
+            if self.isUpdating != updating or self.isCMode != cmode:
+                updateLED = True
+            if self.timeStr != time:
+                updateTime = True
+            if self.tempStr != temp:
+                updateTemp = True
+
+        if updateLED:
+            GPIO.output(LED_RED_GPIO, updating)
+            GPIO.output(LED_GREEN_GPIO, not updating and not cmode)
+            GPIO.output(LED_BLUE_GPIO, not updating and cmode)
+
+        if updateTime:
+            self.lcd.sendString(0, time)
+
+        if updateTemp:
+            self.lcd.sendString(1, temp)
+
+        self.isUpdating = updating
+        self.isCMode = cmode
+        self.timeStr = time
+        self.tempStr = temp
+
+
+def main(display, thermo):
+    GPIO.setup(SWITCH_GPIO, GPIO.IN)
+    
+    cmode = True
+    keyOn = False
+    kcCount = 0
+
+    while True:
+        if kcCount > 0:
+            kcCount = kcCount - 1
+        else:
+            mode = GPIO.input(SWITCH_GPIO)
+            if keyOn and not mode:
+                cmode = not cmode
+                kcCount = SWITCH_NOISE_IGNORE
+            keyOn = mode
+
+        now = datetime.datetime.now()
+        timeStr = now.strftime("%H:%M:%S")
+
+        tempStr = ''
+        if cmode:
+            tempStr = str(thermo.celcius) + C_UNIT
+        else:
+            tempStr = str(thermo.fahrenheit) + F_UNIT
+
+        display.update(thermo.isUpdating, cmode, timeStr, tempStr)
+        
+        time.sleep(MAIN_LOOP_INTERVAL)
+
+if __name__ == '__main__':
+    GPIO.setmode(GPIO.BCM)
+
+    display = Display()
+    thermo = mydev.ThermoSensor(THERMO_SENSOR_ID)
+
+    try:
+        main(display, thermo)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print ''
+        print 'Shutting down...'
+        display.shutdown()
+        thermo.cleanup()
+        display.off()
+        GPIO.cleanup()
